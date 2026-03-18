@@ -2,7 +2,7 @@ import json
 from collections import defaultdict, deque
 
 # -----------------------------
-# 1. OSV 결과 파싱
+# 1. OSV 결과 파싱 (group:name@version)
 # -----------------------------
 def parse_osv_results(file_path, cvss_threshold=7.0):
     vuln_map = {}
@@ -25,7 +25,7 @@ def parse_osv_results(file_path, cvss_threshold=7.0):
                 continue
 
             if cvss >= cvss_threshold:
-                key = f"{package}@{version}"
+                key = f"{package.strip()}@{version.strip()}"
                 vuln_map[key] = {
                     "cvss": cvss,
                     "url": url
@@ -35,7 +35,7 @@ def parse_osv_results(file_path, cvss_threshold=7.0):
 
 
 # -----------------------------
-# 2. SBOM 파싱
+# 2. SBOM 파싱 (group:name@version)
 # -----------------------------
 def parse_sbom(sbom_path):
     with open(sbom_path, 'r', encoding='utf-8') as f:
@@ -51,9 +51,15 @@ def parse_sbom(sbom_path):
         purl = comp.get("purl")
         name = comp.get("name")
         version = comp.get("version")
+        group = comp.get("group")
+
+        if group:
+            key = f"{group}:{name}@{version}"
+        else:
+            key = f"{name}@{version}"
 
         if purl:
-            purl_to_name[purl] = f"{name}@{version}"
+            purl_to_name[purl] = key
 
     for dep in dependencies:
         ref = dep.get("ref")
@@ -71,7 +77,23 @@ def parse_sbom(sbom_path):
 
 
 # -----------------------------
-# 3. 모든 dependency path 추출
+# 3. 매칭 로직
+# -----------------------------
+def is_match(sbom_key, osv_key):
+    # 완전 일치
+    if sbom_key == osv_key:
+        return True
+
+    # group 제거 fallback
+    sbom_name = sbom_key.split(":")[-1]
+    if sbom_name == osv_key:
+        return True
+
+    return False
+
+
+# -----------------------------
+# 4. 모든 dependency path 추출
 # -----------------------------
 def get_all_paths(graph):
     all_paths = []
@@ -86,7 +108,6 @@ def get_all_paths(graph):
         while queue:
             node, path = queue.popleft()
 
-            # leaf node
             if node not in graph or not graph[node]:
                 all_paths.append(path)
                 continue
@@ -99,12 +120,11 @@ def get_all_paths(graph):
 
 
 # -----------------------------
-# 4. 결과 생성
+# 5. 분석
 # -----------------------------
 def analyze(sbom_file, osv_file, output_file):
     vuln_map = parse_osv_results(osv_file)
     graph = parse_sbom(sbom_file)
-
     paths = get_all_paths(graph)
 
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -116,11 +136,12 @@ def analyze(sbom_file, osv_file, output_file):
             vuln_url = ""
 
             for node in path:
-                if node in vuln_map:
-                    vuln_found = True
-                    if vuln_map[node]["cvss"] > max_cvss:
-                        max_cvss = vuln_map[node]["cvss"]
-                        vuln_url = vuln_map[node]["url"]
+                for osv_key in vuln_map:
+                    if is_match(node, osv_key):
+                        vuln_found = True
+                        if vuln_map[osv_key]["cvss"] > max_cvss:
+                            max_cvss = vuln_map[osv_key]["cvss"]
+                            vuln_url = vuln_map[osv_key]["url"]
 
             f.write(f"{' -> '.join(path)},{vuln_found},{max_cvss},{vuln_url}\n")
 
