@@ -2,7 +2,7 @@ import json
 from collections import defaultdict, deque
 
 # -----------------------------
-# 1. OSV 결과 파싱
+# 1. OSV 결과 파싱 (group:name@version)
 # -----------------------------
 def parse_osv_results(file_path, cvss_threshold=7.0):
     vuln_map = {}
@@ -35,7 +35,7 @@ def parse_osv_results(file_path, cvss_threshold=7.0):
 
 
 # -----------------------------
-# 2. SBOM 파싱
+# 2. SBOM 파싱 (group:name@version)
 # -----------------------------
 def parse_sbom(sbom_path):
     with open(sbom_path, 'r', encoding='utf-8') as f:
@@ -80,9 +80,11 @@ def parse_sbom(sbom_path):
 # 3. 매칭 로직
 # -----------------------------
 def is_match(sbom_key, osv_key):
+    # 완전 일치
     if sbom_key == osv_key:
         return True
 
+    # group 제거 fallback
     sbom_name = sbom_key.split(":")[-1]
     if sbom_name == osv_key:
         return True
@@ -91,10 +93,10 @@ def is_match(sbom_key, osv_key):
 
 
 # -----------------------------
-# 4. 특정 취약점 경로 찾기
+# 4. 모든 dependency path 추출
 # -----------------------------
-def find_paths_to_target(graph, target):
-    paths = []
+def get_all_paths(graph):
+    all_paths = []
 
     all_nodes = set(graph.keys())
     all_deps = set(d for deps in graph.values() for d in deps)
@@ -106,39 +108,42 @@ def find_paths_to_target(graph, target):
         while queue:
             node, path = queue.popleft()
 
-            if is_match(node, target):
-                paths.append(path)
+            if node not in graph or not graph[node]:
+                all_paths.append(path)
                 continue
 
-            if node in graph:
-                for next_node in graph[node]:
-                    if next_node not in path:
-                        queue.append((next_node, path + [next_node]))
+            for next_node in graph[node]:
+                if next_node not in path:
+                    queue.append((next_node, path + [next_node]))
 
-    return paths
+    return all_paths
 
 
 # -----------------------------
-# 5. 분석 (핵심)
+# 5. 분석
 # -----------------------------
 def analyze(sbom_file, osv_file, output_file):
     vuln_map = parse_osv_results(osv_file)
     graph = parse_sbom(sbom_file)
+    paths = get_all_paths(graph)
 
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("PACKAGE,VERSION,CVSS,URL,DEPENDENCY_PATH\n")
+        f.write("DEPENDENCY_PATH,VULNERABLE,CVSS,URL\n")
 
-        for osv_key, info in vuln_map.items():
-            paths = find_paths_to_target(graph, osv_key)
+        for path in paths:
+            vuln_found = False
+            max_cvss = 0
+            vuln_url = ""
 
-            # 👉 SBOM에 없는 취약점은 제외
-            if not paths:
-                continue
+            for node in path:
+                for osv_key in vuln_map:
+                    if is_match(node, osv_key):
+                        vuln_found = True
+                        if vuln_map[osv_key]["cvss"] > max_cvss:
+                            max_cvss = vuln_map[osv_key]["cvss"]
+                            vuln_url = vuln_map[osv_key]["url"]
 
-            pkg, ver = osv_key.split("@")
-
-            for path in paths:
-                f.write(f"{pkg},{ver},{info['cvss']},{info['url']},{' -> '.join(path)}\n")
+            f.write(f"{' -> '.join(path)},{vuln_found},{max_cvss},{vuln_url}\n")
 
     print(f"[+] Done. Output: {output_file}")
 
@@ -149,6 +154,6 @@ def analyze(sbom_file, osv_file, output_file):
 if __name__ == "__main__":
     sbom_file = "sbom.json"
     osv_file = "osv_scanner_result.txt"
-    output_file = "filtered_vuln_paths.csv"
+    output_file = "dependency_paths_result.csv"
 
     analyze(sbom_file, osv_file, output_file)
